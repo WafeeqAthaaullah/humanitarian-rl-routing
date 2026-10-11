@@ -13,6 +13,7 @@ from config import (
     TRAIN_EPISODES, LEARNING_RATE,
     EPSILON_START, EPSILON_DECAY, EPSILON_MIN,
     BATCH_SIZE, TARGET_UPDATE_FREQ, LAMBDA_LR,
+    SAFETY_BUDGET
 )
 
 def train_agent():
@@ -80,11 +81,9 @@ def train_agent():
         if ep % TARGET_UPDATE_FREQ == 0:
             agent.update_target_network()
             
-        # Update Lagrangian multiplier based on safety violations
-        if violated:
-            lambda_penalty += LAMBDA_LR * 1.0  # Increase penalty for violation
-        else:
-            lambda_penalty = max(0.0, lambda_penalty - LAMBDA_LR * 1.0)  # Decay penalty if compliant
+        # Update Lagrangian multiplier based on safety violations (CMDP dual ascent)
+        constraint_error = (1.0 if violated else 0.0) - SAFETY_BUDGET
+        lambda_penalty = max(0.0, lambda_penalty + LAMBDA_LR * constraint_error)
         
         # Record metrics
         avg_loss = loss_sum / max(1, steps)

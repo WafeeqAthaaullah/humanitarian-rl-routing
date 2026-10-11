@@ -38,7 +38,7 @@ MODE_SWITCH_DAYS = 1.0         # additional handling time (days)
 
 # Reward / penalty tuning
 INVALID_ACTION_PENALTY = -100.0
-SAFETY_PENALTY = 10.0
+SAFETY_PENALTY = 50.0
 COST_NORMALIZATION = 10000.0
 
 # Transit-time noise parameters
@@ -65,7 +65,7 @@ STATE_DIM = 11
 ACTION_DIM = 5
 NUM_QUANTILES = 50
 HIDDEN_DIM = 128
-CVAR_ALPHA = 0.10   # worst-case fraction for CVaR action selection
+CVAR_ALPHA = 0.05   # worst-case fraction for CVaR action selection
 
 # ---------------------------------------------------------------------------
 # Training hyperparameters
@@ -80,5 +80,6 @@ BATCH_SIZE = 32
 BUFFER_CAPACITY = 50000
 TARGET_UPDATE_FREQ = 10
 LAMBDA_LR = 0.1         # Lagrangian multiplier learning rate
+SAFETY_BUDGET = 0.02     # Target maximum violation rate (e.g. 2%)
 GRAD_CLIP_NORM = 10.0   # max gradient norm for QR-DQN
 
