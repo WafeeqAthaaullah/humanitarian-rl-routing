@@ -1,6 +1,8 @@
 import sys
 import os
 import csv
+import random
+from datetime import datetime, timezone
 import numpy as np
 import torch
 import matplotlib.pyplot as plt
@@ -13,10 +15,16 @@ from config import (
     TRAIN_EPISODES, LEARNING_RATE,
     EPSILON_START, EPSILON_DECAY, EPSILON_MIN,
     BATCH_SIZE, TARGET_UPDATE_FREQ, LAMBDA_LR,
-    SAFETY_BUDGET
+    SAFETY_BUDGET, STATE_DIM, ACTION_DIM, NUM_QUANTILES, CVAR_ALPHA,
 )
 
-def train_agent():
+def train_agent(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    os.makedirs("results/checkpoints", exist_ok=True)
+    os.makedirs("results/logs", exist_ok=True)
+    os.makedirs("results/plots", exist_ok=True)
     env = DubaiHumanitarianEnv()
     agent = QRDQNAgent()
     agent.setup_training(lr=LEARNING_RATE)
@@ -34,12 +42,19 @@ def train_agent():
         "epsilon": [],
         "lambda_penalty": [],
         "violation": [],
+        "tier1": [],
+        "freight_cost": [],
+        "deadline_slack": [],
+        "invalid_action": [],
     }
+    cumulative_tier1 = 0
+    cumulative_violations = 0
+    best_feasible_cost = float("inf")
 
     print(f"Starting training for {TRAIN_EPISODES} episodes...")
     
     for ep in range(TRAIN_EPISODES):
-        state, _ = env.reset()
+        state, reset_info = env.reset(seed=seed + ep)
         episode_reward = 0
         loss_sum = 0
         steps = 0
@@ -47,21 +62,33 @@ def train_agent():
         # Capture initial urgency at episode start (avoids using stale state later)
         is_tier1 = (state[0] == 1.0)
         violated = False
+        episode_cost = 0.0
+        episode_slack = 0.0
+        invalid_action = False
         
         while True:
             # 1. Select action
-            action = agent.act_cvar(state, epsilon)
+            action = agent.act_cvar(
+                state, epsilon, action_mask=reset_info.get("action_mask")
+            )
             
             # 2. Take action
             next_state, reward, terminated, truncated, info = env.step(action)
+            reset_info = info
             
             # Apply current Lagrangian penalty if critical deadline violated
             if terminated and info.get("deadline_hit") is False and is_tier1:
                 reward -= lambda_penalty
                 violated = True
+            episode_cost += float(info.get("freight_cost", 0.0))
+            episode_slack = float(info.get("deadline_slack", episode_slack))
+            invalid_action = invalid_action or "reason" in info
                 
             # 3. Store in memory
-            agent.memory.push(state, action, reward, next_state, terminated)
+            agent.memory.push(
+                state, action, reward, next_state, terminated,
+                info.get("action_mask"),
+            )
             
             # 4. Train
             loss = agent.train_step(batch_size=BATCH_SIZE)
@@ -82,6 +109,9 @@ def train_agent():
             agent.update_target_network()
             
         # Update Lagrangian multiplier based on safety violations (CMDP dual ascent)
+        cumulative_tier1 += int(is_tier1)
+        cumulative_violations += int(violated)
+        tier1_rate = cumulative_violations / max(1, cumulative_tier1)
         constraint_error = (1.0 if violated else 0.0) - SAFETY_BUDGET
         lambda_penalty = max(0.0, lambda_penalty + LAMBDA_LR * constraint_error)
         
@@ -93,6 +123,27 @@ def train_agent():
         history["epsilon"].append(epsilon)
         history["lambda_penalty"].append(lambda_penalty)
         history["violation"].append(1 if violated else 0)
+        history["tier1"].append(1 if is_tier1 else 0)
+        history["freight_cost"].append(episode_cost)
+        history["deadline_slack"].append(episode_slack)
+        history["invalid_action"].append(1 if invalid_action else 0)
+
+        if is_tier1 and tier1_rate <= SAFETY_BUDGET and episode_cost < best_feasible_cost:
+            best_feasible_cost = episode_cost
+            torch.save(
+                {
+                    "model_state_dict": agent.network.state_dict(),
+                    "episode": ep,
+                    "seed": seed,
+                    "cvar_alpha": CVAR_ALPHA,
+                    "state_dim": STATE_DIM,
+                    "action_dim": ACTION_DIM,
+                    "num_quantiles": NUM_QUANTILES,
+                    "tier1_violation_rate": tier1_rate,
+                    "created_at": datetime.now(timezone.utc).isoformat(),
+                },
+                "results/checkpoints/best_feasible_qr_dqn_model.pth",
+            )
         
         if ep % 100 == 0:
             recent_violations = np.mean(history["violation"][-100:]) * 100
@@ -100,17 +151,32 @@ def train_agent():
                   f"Epsilon: {epsilon:.2f} | Lambda: {lambda_penalty:.2f} | Violation Rate (100-ep): {recent_violations:.1f}%")
     
     # Save model weights
-    os.makedirs("results/checkpoints", exist_ok=True)
     model_path = "results/checkpoints/qr_dqn_model.pth"
-    torch.save(agent.network.state_dict(), model_path)
+    torch.save(
+        {
+            "model_state_dict": agent.network.state_dict(),
+            "episode": TRAIN_EPISODES,
+            "seed": seed,
+            "cvar_alpha": CVAR_ALPHA,
+            "state_dim": STATE_DIM,
+            "action_dim": ACTION_DIM,
+            "num_quantiles": NUM_QUANTILES,
+            "tier1_violation_rate": tier1_rate,
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        },
+        model_path,
+    )
     print(f"Model saved to {model_path}")
 
     # Save training logs to CSV
-    os.makedirs("results/logs", exist_ok=True)
     csv_path = "results/logs/training_metrics.csv"
     with open(csv_path, mode="w", newline="", encoding="utf-8") as f:
         writer = csv.writer(f)
-        writer.writerow(["episode", "reward", "loss", "epsilon", "lambda_penalty", "violation"])
+        writer.writerow([
+            "episode", "reward", "loss", "epsilon", "lambda_penalty",
+            "violation", "tier1", "freight_cost", "deadline_slack",
+            "invalid_action",
+        ])
         for i in range(len(history["episode"])):
             writer.writerow([
                 history["episode"][i],
@@ -119,6 +185,10 @@ def train_agent():
                 history["epsilon"][i],
                 history["lambda_penalty"][i],
                 history["violation"][i],
+                history["tier1"][i],
+                history["freight_cost"][i],
+                history["deadline_slack"][i],
+                history["invalid_action"][i],
             ])
     print(f"Training metrics saved to {csv_path}")
 

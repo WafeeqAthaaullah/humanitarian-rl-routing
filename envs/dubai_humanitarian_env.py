@@ -56,7 +56,7 @@ class DubaiHumanitarianEnv(gym.Env):
             s_disrupt,
         ], dtype=np.float32)
         
-        info = {}
+        info = {"action_mask": self.get_action_mask()}
         return self.state, info
 
     def step(self, action):
@@ -67,7 +67,14 @@ class DubaiHumanitarianEnv(gym.Env):
         if not self._is_action_valid(action):
             # Severe penalty for picking an invalid/impossible action, end episode
             reward = INVALID_ACTION_PENALTY
-            return self.state, reward, True, False, {"reason": "invalid_action"}
+            return self.state, reward, True, False, {
+                "reason": "invalid_action",
+                "freight_cost": 0.0,
+                "days_passed": 0.0,
+                "deadline_hit": False,
+                "tier1_violation": bool(u == 1.0),
+                "action_mask": self.get_action_mask(),
+            }
 
         # 2. Transition Dynamics Setup
         days_passed = 0
@@ -77,7 +84,14 @@ class DubaiHumanitarianEnv(gym.Env):
         # Process action effects
         if action == 0:  # AIR_DIRECT
             if c_air < (w / MAX_AIR_CAPACITY):
-                return self.state, INVALID_ACTION_PENALTY, True, False, {"reason": "capacity_exceeded"}
+                return self.state, INVALID_ACTION_PENALTY, True, False, {
+                    "reason": "capacity_exceeded",
+                    "freight_cost": 0.0,
+                    "days_passed": 0.0,
+                    "deadline_hit": False,
+                    "tier1_violation": bool(u == 1.0),
+                    "action_mask": self.get_action_mask(),
+                }
             c_air -= (w / MAX_AIR_CAPACITY)
             days_passed = self._sample_transit_time("air", s_disrupt)
             step_cost = self._get_freight_cost("air", w)
@@ -86,7 +100,14 @@ class DubaiHumanitarianEnv(gym.Env):
             
         elif action == 1:  # OCEAN_TO_HUB
             if c_ocean < (w / MAX_OCEAN_CAPACITY):
-                return self.state, INVALID_ACTION_PENALTY, True, False, {"reason": "capacity_exceeded"}
+                return self.state, INVALID_ACTION_PENALTY, True, False, {
+                    "reason": "capacity_exceeded",
+                    "freight_cost": 0.0,
+                    "days_passed": 0.0,
+                    "deadline_hit": False,
+                    "tier1_violation": bool(u == 1.0),
+                    "action_mask": self.get_action_mask(),
+                }
             c_ocean -= (w / MAX_OCEAN_CAPACITY)
             days_passed = self._sample_transit_time("ocean_leg1", s_disrupt)
             step_cost = self._get_freight_cost("ocean", w)
@@ -95,7 +116,14 @@ class DubaiHumanitarianEnv(gym.Env):
             
         elif action == 2:  # LAND_TO_HUB
             if c_land < (w / MAX_LAND_CAPACITY):
-                return self.state, INVALID_ACTION_PENALTY, True, False, {"reason": "capacity_exceeded"}
+                return self.state, INVALID_ACTION_PENALTY, True, False, {
+                    "reason": "capacity_exceeded",
+                    "freight_cost": 0.0,
+                    "days_passed": 0.0,
+                    "deadline_hit": False,
+                    "tier1_violation": bool(u == 1.0),
+                    "action_mask": self.get_action_mask(),
+                }
             c_land -= (w / MAX_LAND_CAPACITY)
             days_passed = self._sample_transit_time("land_leg1", s_disrupt)
             step_cost = self._get_freight_cost("land", w)
@@ -104,7 +132,14 @@ class DubaiHumanitarianEnv(gym.Env):
 
         elif action == 3:  # SWITCH_TO_AIR (At Regional Checkpoint)
             if c_air < (w / MAX_AIR_CAPACITY):
-                return self.state, INVALID_ACTION_PENALTY, True, False, {"reason": "capacity_exceeded"}
+                return self.state, INVALID_ACTION_PENALTY, True, False, {
+                    "reason": "capacity_exceeded",
+                    "freight_cost": 0.0,
+                    "days_passed": 0.0,
+                    "deadline_hit": False,
+                    "tier1_violation": bool(u == 1.0),
+                    "action_mask": self.get_action_mask(),
+                }
             c_air -= (w / MAX_AIR_CAPACITY)
             days_passed = self._sample_transit_time("air", s_disrupt) + MODE_SWITCH_DAYS
             step_cost = self._get_freight_cost("air", w) + MODE_SWITCH_COST
@@ -144,7 +179,15 @@ class DubaiHumanitarianEnv(gym.Env):
             i_dest, s_disrupt
         ], dtype=np.float32)
         
-        info = {"days_passed": days_passed, "deadline_hit": d_rem >= 0}
+        info = {
+            "days_passed": days_passed,
+            "deadline_hit": d_rem >= 0,
+            "freight_cost": step_cost,
+            "safety_penalty": safety_penalty,
+            "tier1_violation": bool(u == 1.0 and d_rem < 0),
+            "deadline_slack": d_rem,
+            "action_mask": self.get_action_mask(),
+        }
         
         return self.state, reward, terminated, False, info
 
@@ -171,12 +214,30 @@ class DubaiHumanitarianEnv(gym.Env):
         return FREIGHT_RATES.get(mode, 500.0) * weight
 
     def _is_action_valid(self, action):
+        action = int(action)
+        if not 0 <= action < self.action_space.n:
+            return False
+        return bool(self.get_action_mask()[action])
+
+    def get_action_mask(self):
+        """Return legal and capacity-feasible actions for the current state."""
+        if not hasattr(self, "state"):
+            return np.ones(self.action_space.n, dtype=bool)
         location = self.state[4]
-        if location == 0.0 and action in [3, 4]:
-            return False # Cannot switch/continue if still at Origin
-        if location == 1.0 and action in [0, 1, 2]:
-            return False # Cannot pick origin dispatch if already at Regional Checkpoint
-        return True
+        weight = self.state[2]
+        capacities = self.state[6:9]
+        required = np.array(
+            [weight / MAX_AIR_CAPACITY, weight / MAX_OCEAN_CAPACITY,
+             weight / MAX_LAND_CAPACITY, weight / MAX_AIR_CAPACITY, 0.0]
+        )
+        mask = capacities[[0, 1, 2, 0, 0]] >= required
+        if location == 0.0:
+            mask[[3, 4]] = False
+        elif location == 1.0:
+            mask[[0, 1, 2]] = False
+        else:
+            mask[:] = False
+        return mask.astype(bool)
 
 if __name__ == "__main__":
     env = DubaiHumanitarianEnv()

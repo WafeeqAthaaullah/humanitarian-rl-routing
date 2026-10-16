@@ -67,14 +67,20 @@ class QRDQNAgent:
         """
         return (state_tensor - self._obs_low) / self._obs_range
 
-    def act_cvar(self, state, epsilon=0.0):
+    def act_cvar(self, state, epsilon=0.0, action_mask=None):
         """
         Risk-sensitive action selection (CVaR).
         Looks at the worst 10% of predicted outcomes and chooses the safest route.
         """
         # Epsilon-greedy exploration
+        if action_mask is None:
+            action_mask = np.ones(self.action_dim, dtype=bool)
+        action_mask = np.asarray(action_mask, dtype=bool)
+        valid_actions = np.flatnonzero(action_mask)
+        if len(valid_actions) == 0:
+            raise ValueError("Action mask contains no valid actions")
         if np.random.rand() < epsilon:
-            return np.random.randint(self.action_dim)
+            return int(np.random.choice(valid_actions))
             
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         state_tensor = self._normalize(state_tensor)
@@ -91,6 +97,7 @@ class QRDQNAgent:
             
             # Calculate the mean of these worst-case outcomes for each action
             cvar_values = worst_case_returns.mean(dim=2).squeeze(0)
+            cvar_values[~torch.as_tensor(action_mask, device=self.device)] = -torch.inf
             
             # Pick the action with the "least bad" worst-case outcome
             return torch.argmax(cvar_values).item()
@@ -112,7 +119,7 @@ class QRDQNAgent:
         if len(self.memory) < batch_size:
             return 0.0 # Not enough experience to train yet
             
-        states, actions, rewards, next_states, dones = self.memory.sample(batch_size)
+        states, actions, rewards, next_states, dones, next_masks = self.memory.sample(batch_size)
         
         # Normalize observations before feeding to the network
         states = self._normalize(torch.FloatTensor(states).to(self.device))
@@ -120,6 +127,7 @@ class QRDQNAgent:
         rewards = torch.FloatTensor(rewards).unsqueeze(1).to(self.device)
         dones = torch.FloatTensor(dones).unsqueeze(1).to(self.device)
         next_states = self._normalize(torch.FloatTensor(next_states).to(self.device))
+        next_masks = torch.BoolTensor(next_masks).to(self.device)
         
         # 1. Get current quantile predictions for the actions taken
         current_quantiles = self.network(states) # [batch, actions, quantiles]
@@ -129,7 +137,9 @@ class QRDQNAgent:
         with torch.no_grad():
             next_quantiles = self.network(next_states)
             # Greedy action selection based on mean return
-            next_actions = next_quantiles.mean(dim=2).argmax(dim=1, keepdim=True)
+            next_values = next_quantiles.mean(dim=2)
+            next_values = next_values.masked_fill(~next_masks, -torch.inf)
+            next_actions = next_values.argmax(dim=1, keepdim=True)
             
             target_next_quantiles = self.target_network(next_states)
             target_action_quantiles = target_next_quantiles.gather(1, next_actions.unsqueeze(-1).expand(-1, -1, self.num_quantiles)).squeeze(1)
@@ -161,14 +171,17 @@ class ReplayBuffer:
     def __init__(self, capacity=BUFFER_CAPACITY):
         self.buffer = deque(maxlen=capacity)
     
-    def push(self, state, action, reward, next_state, done):
-        self.buffer.append((state, action, reward, next_state, done))
+    def push(self, state, action, reward, next_state, done, next_action_mask=None):
+        if next_action_mask is None:
+            next_action_mask = np.ones(5, dtype=bool)
+        self.buffer.append((state, action, reward, next_state, done, next_action_mask))
     
     def sample(self, batch_size):
         batch = random.sample(self.buffer, batch_size)
-        states, actions, rewards, next_states, dones = zip(*batch)
+        states, actions, rewards, next_states, dones, next_masks = zip(*batch)
         return (np.array(states), np.array(actions), np.array(rewards, dtype=np.float32), 
-                np.array(next_states), np.array(dones, dtype=np.float32))
+                np.array(next_states), np.array(dones, dtype=np.float32),
+                np.array(next_masks, dtype=bool))
     
     def __len__(self):
         return len(self.buffer)

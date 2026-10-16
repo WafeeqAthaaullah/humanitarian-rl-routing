@@ -56,3 +56,23 @@ class StaticThresholdAgent:
             if is_critical_and_urgent and can_use_air:
                 return 3  # Switch to Air
             return 4      # Continue
+
+
+class AlwaysAirAgent:
+    """Safety-first baseline that uses air whenever it is feasible."""
+
+    def __init__(self, env):
+        self.env = env
+
+    def act(self, state):
+        return 0 if state[4] == 0.0 else 3
+
+
+class AlwaysOceanAgent:
+    """Cost-first baseline that uses ocean and then continues nominally."""
+
+    def __init__(self, env):
+        self.env = env
+
+    def act(self, state):
+        return 1 if state[4] == 0.0 else 4

@@ -79,9 +79,17 @@ python scripts/train.py
 ```
 
 ### Benchmark Agents
-Evaluate QR-DQN against heuristic baselines over 500 Monte Carlo episodes:
+Evaluate QR-DQN against repeated-seed baselines over 500 Monte Carlo episodes:
 ```bash
 python scripts/evaluate_model.py
+```
+The benchmark reports 95% confidence intervals, Tier 1 violation rates, explicit
+freight costs, deadline slack, and invalid-action rates. It includes Always-Air,
+Always-Ocean, Greedy-Cheapest, Static Threshold, and QR-DQN baselines. Use
+`--episodes` and `--seeds` to control experiment size.
+
+```bash
+python scripts/evaluate_model.py --episodes 500 --seeds 10
 ```
 *Outputs comparative statistics and saves a plot to `results/plots/performance_comparison.png`.*
 
@@ -100,4 +108,5 @@ Open `project_demonstration.ipynb` in Jupyter Notebook or VS Code to step throug
 - **Deadline Violation Rate (%)**: Proportion of Tier-1 critical shipments missing deadline.
 - **Average Freight Cost ($)**: Realized transportation cost per shipment.
 - **Safety vs. Cost Trade-off**: Compares conservative threshold heuristic, cost-blind greedy dispatch, and risk-aware QR-DQN.
-
+- **Reproducibility**: Training accepts a seed, records configuration metadata in the checkpoint, and saves a best-feasible checkpoint when the Tier 1 constraint is satisfied.
+- **Action masking**: Agents receive legal, capacity-feasible action masks; random exploration cannot deliberately select impossible transitions.
