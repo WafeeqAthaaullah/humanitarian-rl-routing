@@ -11,15 +11,21 @@ action_map = {0: "AIR_DIRECT", 1: "OCEAN_TO_HUB", 2: "LAND_TO_HUB", 3: "SWITCH_T
 def run_live_demo():
     env = DubaiHumanitarianEnv()
     agent = QRDQNAgent()
-    agent.network.load_state_dict(torch.load("results/checkpoints/qr_dqn_model.pth", weights_only=True))
+    checkpoint = torch.load(
+        "results/checkpoints/qr_dqn_model.pth",
+        map_location=agent.device,
+        weights_only=True,
+    )
+    agent.network.load_state_dict(checkpoint.get("model_state_dict", checkpoint))
     agent.network.eval()
     
     # Force a challenging scenario for the demo
-    state, _ = env.reset()
+    state, info = env.reset(seed=42)
     state[0] = 1.0  # Tier 1 Critical
     state[3] = 10.0 # Very tight deadline
     state[10] = 0.3 # High disruption probability
     env.state = state
+    info["action_mask"] = env.get_action_mask()
     
     print("\n" + "="*50)
     print("DUBAI HUMANITARIAN LIVE DISPATCH DEMO")
@@ -32,7 +38,9 @@ def run_live_demo():
         loc = "Dubai Hub" if state[4] == 0.0 else "Regional Checkpoint"
         print(f"Current Location: {loc}")
         
-        action = agent.act_cvar(state, epsilon=0.0)
+        action = agent.act_cvar(
+            state, epsilon=0.0, action_mask=info["action_mask"]
+        )
         print(f"Agent selects: {action_map[action]}")
         
         state, reward, terminated, truncated, info = env.step(action)
