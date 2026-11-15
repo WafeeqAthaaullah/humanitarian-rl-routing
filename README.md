@@ -35,21 +35,44 @@ This project implements a **Constrained Markov Decision Process (CMDP)** and tra
 ## 📂 Project Structure
 ```text
 humanitarian-rl-routing/
+├── backend/                        # Modular FastAPI backend
+│   ├── main.py                    # REST API server & static asset mount
+│   ├── schemas.py                 # Pydantic models for simulation & showdown
+│   └── inference.py               # Checkpoint caching, CVaR inference & simulation runner
+├── frontend/                       # Interactive React + TypeScript + Tailwind CSS web app
+│   ├── src/
+│   │   ├── components/
+│   │   │   ├── ControlSidebar.tsx         # What-If scenario controls & timeline playback
+│   │   │   ├── RouteVisualizer.tsx        # Multi-echelon flow diagram & intermodal pivot animation
+│   │   │   ├── QuantileRiskInspector.tsx  # Plotly 50-quantile distribution & 5% CVaR tail inspector
+│   │   │   ├── AgentShowdown.tsx          # 7-model synchronous benchmark comparison
+│   │   │   ├── TrainingDiagnostics.tsx    # Training telemetry curves
+│   │   │   ├── Navbar.tsx                 # Operational command center header
+│   │   │   └── PlotlyChart.tsx            # Responsive Plotly container
+│   │   ├── api.ts                         # Typed API client
+│   │   ├── types.ts                       # TypeScript interfaces
+│   │   └── App.tsx                        # Main command center layout
+│   └── package.json
+├── run_app.sh                      # Unified Unix/Mac bash launcher script
+├── run_app.bat                     # Windows one-click command center launcher
 ├── config.py                       # Centralized environment and agent hyperparameters
 ├── requirements.txt                # Python package dependencies
 ├── envs/
 │   ├── __init__.py
 │   └── dubai_humanitarian_env.py   # Custom Gymnasium simulation environment
 ├── agents/
-│   ├── __init__.py
 │   ├── heuristics.py              # Greedy and Threshold baseline agents
-│   └── qr_dqn_agent.py            # QR-DQN network, CVaR policy & ReplayBuffer
+│   ├── random_agent.py            # Random masked action baseline
+│   ├── dqn_agent.py               # Standard scalar Deep Q-Network baseline
+│   ├── ddqn_lagrangian_agent.py   # Double DQN with Lagrangian safety penalty
+│   ├── qr_dqn_mean_agent.py       # QR-DQN with risk-neutral mean action selection
+│   └── qr_dqn_agent.py            # QR-DQN network with risk-averse CVaR policy
 ├── scripts/
-│   ├── train.py                    # Training loop with Lagrangian safety updates & curve plotting
-│   ├── evaluate_model.py           # Multi-agent benchmark evaluation & comparison plot
-│   └── demo.py                     # Interactive CLI trace of high-risk cargo dispatch
+│   ├── train.py                    # Training loop with Lagrangian safety updates
+│   ├── evaluate_model.py           # Multi-agent benchmark evaluation
+│   └── demo.py                     # CLI trace of high-risk cargo dispatch
 ├── results/
-│   ├── checkpoints/               # Saved model weights (qr_dqn_model.pth)
+│   ├── checkpoints/               # Trained neural network weights (.pth)
 │   ├── logs/                      # Training history metrics (training_metrics.csv)
 │   └── plots/                     # Evaluation and training curves (PNGs)
 └── project_demonstration.ipynb     # Interactive Jupyter demonstration notebook
@@ -67,6 +90,64 @@ humanitarian-rl-routing/
 ```bash
 pip install -r requirements.txt
 ```
+
+---
+
+## 🌐 Web Application (Command Center)
+
+An interactive, dark-mode operational command center built with **FastAPI** (backend) and **React + TypeScript + Tailwind CSS + Plotly.js** (frontend) to explore the 3-echelon environment, inspect distributional tail risk, and run synchronous 7-model showdowns.
+
+### Quick Start (One Command)
+- **Linux / macOS**:
+  ```bash
+  chmod +x run_app.sh
+  ./run_app.sh
+  ```
+- **Windows**:
+  Double-click `run_app.bat` or run in terminal:
+  ```powershell
+  .\run_app.bat
+  ```
+
+### Manual Execution
+
+#### 1. Start FastAPI Backend (Port 8000)
+```bash
+python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+```
+- Interactive API Docs (Swagger UI): `http://127.0.0.1:8000/docs`
+- Unified Web Application: `http://127.0.0.1:8000/`
+
+#### 2. Start React Dev Server (Port 5173, optional for development)
+```bash
+cd frontend
+npm install
+npm run dev
+```
+Open `http://localhost:5173` in your browser.
+
+---
+
+### Core Interactive Features
+
+1. **Interactive "What-If" Dispatch Simulator & Playback Timeline**:
+   - Sidebar matching the 11-dimensional state space: Urgency Tier (Tier 1 vs. Tier 2), Shipment Weight (0.5–50 t), Deadline Remaining (5–30 days), and Disruption Shock Probability (0%–50%).
+   - Select any of the 7 models and click **"Simulate Dispatch"** to execute a seeded episode live.
+   - Step-by-step playback controls: Play/Pause, Step Back/Forward, and step inspector card.
+
+2. **Multi-Echelon Route & Intermodal Pivot Visualizer**:
+   - Dynamic SVG diagram illustrating the 3 echelons: **Dubai Origin $\rightarrow$ Regional Checkpoint $\rightarrow$ Disaster Site**.
+   - Distinct paths for Direct Air, Ocean Leg 1, Overland Leg 1, Nominal Leg 2, and the **Emergency Intermodal Air Pivot (`SWITCH_TO_AIR`)**.
+   - Live visual disruption alerts when maritime delays trigger and animated highlight of adaptive intermodal recovery.
+
+3. **Real-Time 50-Quantile & 5% CVaR Risk Inspector (`Plotly.js`)**:
+   - Visualizes all 50 predicted return quantiles ($Z_1 \dots Z_{50}$) for each candidate action.
+   - Red shaded risk zone highlights the worst $\alpha = 5\%$ tail ($Z_1 \dots Z_3$) with a vertical cutoff.
+   - Side-by-side callout reveals why `QR-DQN + CVaR` rejects ocean freight when disruption risk spikes while standard `DQN` and `QR-DQN-Mean` get trapped by the average.
+
+4. **Live 7-Model Synchronous Showdown**:
+   - Simultaneously benchmarks **Greedy, Static Threshold, Random, DQN, DDQN, QR-DQN-Mean, and QR-DQN + CVaR** on the exact same seeded disruption scenario.
+   - Side-by-side comparison table featuring delivery badges (**`DELIVERED`** vs. **`DEADLINE VIOLATED`**), total freight cost, elapsed days, intermodal pivot status, and route sequence.
 
 ---
 
