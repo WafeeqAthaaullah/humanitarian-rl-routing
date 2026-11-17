@@ -1,540 +1,169 @@
-import React from "react";
-import {
-  Ship,
-  Plane,
-  AlertTriangle,
-  Zap,
-  CheckCircle2,
-  XCircle,
-  MapPin,
-  Clock,
-  DollarSign,
-  Package,
-} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import Map, { NavigationControl, useControl } from "@vis.gl/react-maplibre";
+import { MapboxOverlay } from "@deck.gl/mapbox";
+import type { Layer } from "@deck.gl/core";
+import { ArcLayer, PathLayer } from "@deck.gl/layers";
+import { ScenegraphLayer } from "@deck.gl/mesh-layers";
+import "maplibre-gl/dist/maplibre-gl.css";
+import { AlertTriangle, Box, Map as MapIcon, MapPinned, Radio, RotateCcw } from "lucide-react";
 import type { SimulationResponse, TrajectoryStep } from "../types";
+import { MODEL_CONFIG, type Model3dKey } from "../config/models3d";
+import { useExternalModels } from "../hooks/useExternalModels";
+import type { InternationalRoute, InternationalTransportMode } from "../config/internationalRoutes";
 
 interface RouteVisualizerProps {
   simulation: SimulationResponse | null;
   currentStepIndex: number;
+  route: InternationalRoute;
 }
 
-export const RouteVisualizer: React.FC<RouteVisualizerProps> = ({
-  simulation,
-  currentStepIndex,
-}) => {
-  if (!simulation || simulation.trajectory.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full min-h-[460px] bg-slate-950/60 rounded-2xl border border-slate-800/80 p-8 text-center">
-        <div className="w-16 h-16 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 flex items-center justify-center text-emerald-400 mb-4 animate-pulse">
-          <Plane className="h-8 w-8" />
-        </div>
-        <h3 className="text-lg font-semibold text-slate-200">
-          Ready for Dispatch Simulation
-        </h3>
-        <p className="text-xs text-slate-400 max-w-md mt-2">
-          Adjust scenario parameters in the left sidebar (Urgency Tier, Weight,
-          Deadline, Disruption Shock) and click{" "}
-          <strong className="text-emerald-400">"Simulate Dispatch"</strong> to
-          visualize the live multi-echelon journey and dynamic intermodal pivots.
-        </p>
-      </div>
-    );
+type Position = [number, number, number];
+type GeoPoint = [number, number];
+type VehicleDatum = { position: Position; orientation: [number, number, number] };
+
+const HORMUZ: GeoPoint = [56.45, 26.55];
+const RAS_AL_HADD: GeoPoint = [59.85, 22.5];
+const SALALAH_OFFSHORE: GeoPoint = [54.5, 16.5];
+const GULF_OF_ADEN: GeoPoint = [46.5, 12.6];
+const BAB_EL_MANDEB: GeoPoint = [43.35, 12.55];
+const CAPE_GUARDAFUI: GeoPoint = [51.4, 11.8];
+const EAST_ARABIAN_SEA: GeoPoint = [63.5, 22.5];
+const BAY_OF_BENGAL: GeoPoint = [86, 15];
+
+function DeckOverlay({ layers }: { layers: Layer[] }) {
+  const overlay = useControl(() => new MapboxOverlay({ interleaved: false, layers }));
+  useEffect(() => overlay.setProps({ layers }), [layers, overlay]);
+  return null;
+}
+
+function lineForMode(route: InternationalRoute, mode: Exclude<InternationalTransportMode, "multimodal">, from: GeoPoint, to: GeoPoint): GeoPoint[] {
+  if (mode !== "ocean") return [from, to];
+  const isGlobalOriginLeg = from[0] > 50 && from[1] > 15;
+  if (!isGlobalOriginLeg) {
+    if (route.checkpoint.id === "mombasa" || route.destination.id === "dadaab") return [from, CAPE_GUARDAFUI, to];
+    if (route.checkpoint.id === "karachi" || route.destination.id === "dhaka" || route.destination.id === "kathmandu") return [from, BAY_OF_BENGAL, to];
+    return [from, BAB_EL_MANDEB, to];
   }
+  if (route.checkpoint.id === "mombasa" || route.destination.id === "dadaab") {
+    return [from, HORMUZ, RAS_AL_HADD, SALALAH_OFFSHORE, CAPE_GUARDAFUI, to];
+  }
+  if (route.checkpoint.id === "karachi" || route.destination.id === "dhaka" || route.destination.id === "kathmandu") {
+    return [from, HORMUZ, RAS_AL_HADD, EAST_ARABIAN_SEA, BAY_OF_BENGAL, to];
+  }
+  return [from, HORMUZ, RAS_AL_HADD, SALALAH_OFFSHORE, GULF_OF_ADEN, BAB_EL_MANDEB, to];
+}
 
-  const currentStep: TrajectoryStep = simulation.trajectory[currentStepIndex] || simulation.trajectory[0];
-  const isFinalStep = currentStepIndex === simulation.trajectory.length - 1;
-  const isDelivered = simulation.status === "Delivered";
+function interpolatePath(path: GeoPoint[], progress: number, altitude: number): Position {
+  const safeProgress = Math.max(0, Math.min(1, progress));
+  const segment = Math.min(path.length - 2, Math.floor(safeProgress * (path.length - 1)));
+  const localProgress = safeProgress * (path.length - 1) - segment;
+  const from = path[segment];
+  const to = path[segment + 1];
+  return [from[0] + (to[0] - from[0]) * localProgress, from[1] + (to[1] - from[1]) * localProgress, altitude];
+}
 
-  // Check which routes have been traversed up to current step
-  const executedSteps = simulation.trajectory.slice(0, currentStepIndex + 1);
-  const directAirActive = executedSteps.some((s) => s.action === 0);
-  const oceanLeg1Active = executedSteps.some((s) => s.action === 1);
-  const landLeg1Active = executedSteps.some((s) => s.action === 2);
-  const pivotAirActive = executedSteps.some((s) => s.action === 3);
-  const continueNominalActive = executedSteps.some((s) => s.action === 4);
+function bearingFor(path: GeoPoint[], progress: number): number {
+  const point = interpolatePath(path, progress, 0);
+  const next = interpolatePath(path, Math.min(1, progress + 0.02), 0);
+  return Math.atan2(next[0] - point[0], next[1] - point[1]) * 180 / Math.PI;
+}
 
-  // Disruption on current step or any step so far
-  const disruptionTriggeredNow = currentStep.disruption_triggered;
-  const anyDisruption = executedSteps.some((s) => s.disruption_triggered);
+function modeForStep(step: TrajectoryStep | undefined, route: InternationalRoute): Exclude<InternationalTransportMode, "multimodal"> {
+  if (route.mode !== "multimodal") return route.mode;
+  const backendMode = step?.transport_mode.toLowerCase() || "";
+  if (backendMode.includes("air")) return "air";
+  if (backendMode.includes("ocean") || backendMode.includes("sea")) return "ocean";
+  return step ? "overland" : route.leg1Mode;
+}
 
-  // Active step transport mode indicator
-  const activeAction = currentStep.action;
+function fitCamera(route: InternationalRoute, view: "3d" | "2d") {
+  const points = [route.origin.coordinates, route.checkpoint.coordinates, route.destination.coordinates];
+  const minLon = Math.min(...points.map(point => point[0]));
+  const maxLon = Math.max(...points.map(point => point[0]));
+  const minLat = Math.min(...points.map(point => point[1]));
+  const maxLat = Math.max(...points.map(point => point[1]));
+  const longitude = (minLon + maxLon) / 2;
+  const latitude = (minLat + maxLat) / 2;
+  const span = Math.max(maxLon - minLon, maxLat - minLat, 8);
+  const zoom = Math.max(3.2, Math.min(7.5, Math.log2(360 / span) - 0.35));
+  return { longitude, latitude, zoom, pitch: view === "3d" ? 45 : 0, bearing: view === "3d" ? -10 : 0, padding: { top: 90, bottom: 90, left: 90, right: 90 } };
+}
 
-  return (
-    <div className="flex flex-col h-full bg-slate-950/80 rounded-2xl border border-slate-800/80 overflow-hidden shadow-2xl relative">
-      {/* Top Status & KPI Header */}
-      <div className="p-4 bg-slate-900/80 border-b border-slate-800 flex flex-wrap items-center justify-between gap-3">
-        <div className="flex items-center space-x-3">
-          <div
-            className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider flex items-center space-x-1.5 border shadow-sm ${
-              isDelivered
-                ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-                : "bg-red-500/20 text-red-300 border-red-500/40"
-            }`}
-          >
-            {isDelivered ? (
-              <>
-                <CheckCircle2 className="h-4 w-4 text-emerald-400" />
-                <span>DELIVERED • IN SAFETY BUDGET</span>
-              </>
-            ) : (
-              <>
-                <XCircle className="h-4 w-4 text-red-400" />
-                <span>DEADLINE VIOLATED</span>
-              </>
-            )}
-          </div>
-          <span className="text-xs text-slate-400 font-mono hidden sm:inline">
-            Agent: <strong className="text-white">{simulation.agent_name}</strong>
-          </span>
-        </div>
+export function RouteVisualizer({ simulation, currentStepIndex, route }: RouteVisualizerProps) {
+  const models = useExternalModels();
+  const [view, setView] = useState<"3d" | "2d">("3d");
+  const [preset, setPreset] = useState("Corridor Overview");
+  const [calibrationOpen, setCalibrationOpen] = useState(false);
+  const [calibration, setCalibration] = useState<Record<Model3dKey, { pitch: number; yaw: number; scale: number }>>({
+    cargoShip: { pitch: 0, yaw: 0, scale: 1 },
+    cargoPlane: { pitch: 0, yaw: 0, scale: 1 },
+    cargoTruck: { pitch: 0, yaw: 0, scale: 1 },
+    isoContainer: { pitch: 0, yaw: 0, scale: 1 },
+  });
+  const [progress, setProgress] = useState(0);
+  const step = simulation?.trajectory[currentStepIndex];
+  const activeMode = modeForStep(step, route);
+  const leg1Path = lineForMode(route, route.mode === "multimodal" ? route.leg1Mode : route.mode, route.origin.coordinates, route.checkpoint.coordinates);
+  const leg2Path = lineForMode(route, route.mode === "multimodal" ? route.leg2Mode : route.mode, route.checkpoint.coordinates, route.destination.coordinates);
 
-        {/* Live KPI telemetry */}
-        <div className="flex items-center space-x-4 text-xs font-mono">
-          <div className="flex items-center space-x-1.5">
-            <DollarSign className="h-4 w-4 text-emerald-400" />
-            <span className="text-slate-400">Total Cost:</span>
-            <span className="text-emerald-400 font-bold">
-              ${currentStep.cumulative_cost.toLocaleString()}
-            </span>
-          </div>
-          <div className="flex items-center space-x-1.5">
-            <Clock className="h-4 w-4 text-amber-400" />
-            <span className="text-slate-400">Days Elapsed:</span>
-            <span className="text-amber-400 font-bold">
-              {currentStep.days_elapsed.toFixed(1)} / {simulation.initial_deadline.toFixed(1)}d
-            </span>
-          </div>
-          <div className="flex items-center space-x-1.5">
-            <Package className="h-4 w-4 text-cyan-400" />
-            <span className="text-slate-400">Cargo:</span>
-            <span className="text-cyan-400 font-bold">
-              {simulation.scenario.shipment_weight}t
-            </span>
-          </div>
-        </div>
-      </div>
+  useEffect(() => {
+    const target = simulation?.trajectory.length ? currentStepIndex / Math.max(1, simulation.trajectory.length - 1) : 0;
+    const start = progress;
+    const started = performance.now();
+    let frame = 0;
+    const animate = (now: number) => {
+      const eased = Math.min(1, (now - started) / 550);
+      setProgress(start + (target - start) * (eased * (2 - eased)));
+      if (eased < 1) frame = requestAnimationFrame(animate);
+    };
+    frame = requestAnimationFrame(animate);
+    return () => cancelAnimationFrame(frame);
+  }, [currentStepIndex, simulation?.trajectory.length]);
 
-      {/* Disruption & Pivot Notification Alerts */}
-      <div className="px-4 pt-3 space-y-2">
-        {disruptionTriggeredNow && (
-          <div className="p-2.5 rounded-xl bg-red-950/60 border border-red-500/60 text-red-200 text-xs flex items-center justify-between shadow-lg shadow-red-950/40 animate-pulse">
-            <div className="flex items-center space-x-2">
-              <AlertTriangle className="h-4 w-4 text-red-400 shrink-0" />
-              <span>
-                <strong>CRITICAL MARITIME DISRUPTION:</strong> Fat-tailed delay shock activated (+
-                {currentStep.days_passed.toFixed(1)} days) due to severe port bottleneck!
-              </span>
-            </div>
-            <span className="px-2 py-0.5 rounded bg-red-500/20 text-red-300 font-mono text-[10px] font-bold">
-              S_disrupt = {(simulation.scenario.disruption_shock_prob * 100).toFixed(0)}%
-            </span>
-          </div>
-        )}
+  const layers = useMemo(() => {
+    const activePath = activeMode === "ocean" ? (progress < 0.5 ? leg1Path : leg2Path) : activeMode === "air" ? [route.origin.coordinates, route.checkpoint.coordinates, route.destination.coordinates] : [route.origin.coordinates, route.checkpoint.coordinates, route.destination.coordinates];
+    const activeLocalProgress = progress < 0.5 ? progress * 2 : (progress - 0.5) * 2;
+    const activePosition = interpolatePath(activePath, activeLocalProgress, activeMode === "air" ? 120000 : 120);
+    const activeBearing = bearingFor(activePath, activeLocalProgress);
+    const layerForVehicle = (key: Model3dKey, data: VehicleDatum[]) => new ScenegraphLayer({
+      id: `${key}-international`,
+      data,
+      scenegraph: models[key].scenegraph,
+      getPosition: datum => datum.position,
+      getOrientation: datum => [MODEL_CONFIG[key].basePitchDeg + datum.orientation[0] + calibration[key].pitch, -datum.orientation[1] + MODEL_CONFIG[key].yawOffsetDeg + calibration[key].yaw, datum.orientation[2]],
+      getScale: [models[key].baseScale * MODEL_CONFIG[key].scaleMultiplier * calibration[key].scale, models[key].baseScale * MODEL_CONFIG[key].scaleMultiplier * calibration[key].scale, models[key].baseScale * MODEL_CONFIG[key].scaleMultiplier * calibration[key].scale],
+      sizeScale: MODEL_CONFIG[key].sizeScale,
+      sizeMinPixels: MODEL_CONFIG[key].sizeMinPixels,
+      sizeMaxPixels: MODEL_CONFIG[key].sizeMaxPixels,
+      getColor: [255, 255, 255],
+      pickable: true,
+    });
+    const containerData = [route.origin, route.checkpoint, route.destination].flatMap((waypoint, hubIndex) => Array.from({ length: 4 }, (_, stack) => ({
+      position: [waypoint.coordinates[0], waypoint.coordinates[1], stack * 120] as Position,
+      color: hubIndex === 2 && step?.tier1_violation ? [220, 38, 38] : hubIndex === 1 ? [217, 119, 6] : [13, 148, 136],
+    })));
+    const oceanPath = route.mode === "ocean" || route.mode === "multimodal" && (route.leg1Mode === "ocean" || route.leg2Mode === "ocean") ? [...(route.leg1Mode === "ocean" || route.mode === "ocean" ? leg1Path : []), ...(route.leg2Mode === "ocean" || route.mode === "ocean" ? leg2Path : [])] : [];
+    const roadPath = route.mode === "overland" || route.mode === "multimodal" && (route.leg1Mode === "overland" || route.leg2Mode === "overland") ? [route.origin.coordinates, route.checkpoint.coordinates, route.destination.coordinates] : [];
+    const airSegments = route.mode === "air" ? [[route.origin.coordinates, route.checkpoint.coordinates], [route.checkpoint.coordinates, route.destination.coordinates]] : route.mode === "multimodal" ? [[route.origin.coordinates, route.checkpoint.coordinates], [route.checkpoint.coordinates, route.destination.coordinates]].filter((_, index) => [route.leg1Mode, route.leg2Mode][index] === "air") : [];
+    return [
+      new PathLayer({ id: "international-sea-lanes", data: oceanPath.length ? [{ path: oceanPath.map(point => [point[0], point[1], 0] as Position) }] : [], getPath: datum => datum.path, getColor: [2, 132, 199], getWidth: 9, widthMinPixels: 3, pickable: true }),
+      new PathLayer({ id: "international-road-corridors", data: roadPath.length ? [{ path: roadPath.map(point => [point[0], point[1], 100] as Position) }] : [], getPath: datum => datum.path, getColor: [217, 119, 6], getWidth: 8, widthMinPixels: 3, pickable: true }),
+      new ArcLayer({ id: "international-air-corridors", data: airSegments.map(([from, to]) => ({ source: [...from, 0] as Position, target: [...to, 120000] as Position })), getSourcePosition: datum => datum.source, getTargetPosition: datum => datum.target, getSourceColor: [79, 70, 229], getTargetColor: [124, 58, 237], getWidth: 7, getHeight: 0.65, pickable: true }),
+      new ScenegraphLayer({ id: "international-container-yards", data: containerData, scenegraph: models.isoContainer.scenegraph, getPosition: datum => datum.position, getColor: datum => new Uint8Array(datum.color), getOrientation: () => [MODEL_CONFIG.isoContainer.basePitchDeg + calibration.isoContainer.pitch, calibration.isoContainer.yaw, 0], getScale: [models.isoContainer.baseScale * calibration.isoContainer.scale, models.isoContainer.baseScale * calibration.isoContainer.scale, models.isoContainer.baseScale * calibration.isoContainer.scale], sizeScale: MODEL_CONFIG.isoContainer.sizeScale, sizeMinPixels: MODEL_CONFIG.isoContainer.sizeMinPixels, sizeMaxPixels: MODEL_CONFIG.isoContainer.sizeMaxPixels, pickable: true }),
+      layerForVehicle("cargoShip", [{ position: [...route.origin.coordinates, 400] as Position, orientation: [0, bearingFor(leg1Path, 0), 0] }, { position: [...route.checkpoint.coordinates, 400] as Position, orientation: [0, bearingFor(leg2Path, 0), 0] }, ...(activeMode === "ocean" ? [{ position: activePosition, orientation: [0, activeBearing, 0] as [number, number, number] }] : [])]),
+      layerForVehicle("cargoPlane", [{ position: [...route.origin.coordinates, 120000] as Position, orientation: [8, 45, 0] }, { position: [...route.checkpoint.coordinates, 120000] as Position, orientation: [8, 45, 0] }, ...(activeMode === "air" ? [{ position: activePosition, orientation: [8, activeBearing, 0] as [number, number, number] }] : [])]),
+      layerForVehicle("cargoTruck", [{ position: [...route.checkpoint.coordinates, 300] as Position, orientation: [0, 90, 0] }, { position: [...route.destination.coordinates, 300] as Position, orientation: [0, 90, 0] }, ...(activeMode === "overland" ? [{ position: activePosition, orientation: [0, activeBearing, 0] as [number, number, number] }] : [])]),
+    ] as Layer[];
+  }, [activeMode, calibration, leg1Path, leg2Path, models, progress, route, step]);
 
-        {currentStep.is_pivot && (
-          <div className="p-2.5 rounded-xl bg-amber-950/70 border border-amber-500/70 text-amber-200 text-xs flex items-center justify-between shadow-lg shadow-amber-950/40">
-            <div className="flex items-center space-x-2">
-              <Zap className="h-4 w-4 text-amber-400 shrink-0 animate-bounce" />
-              <span>
-                <strong>DYNAMIC INTERMODAL PIVOT (`SWITCH_TO_AIR`):</strong> Agent detected deadline shortfall at Regional Checkpoint and aborted maritime leg to expedite cargo by Air!
-              </span>
-            </div>
-            <span className="px-2 py-0.5 rounded bg-amber-500/30 text-amber-200 font-mono text-[10px] font-bold">
-              +1.0d Handling | $2,000/t
-            </span>
-          </div>
-        )}
-      </div>
+  const camera = preset === "Dubai Origin Hub" ? { ...fitCamera(route, view), longitude: route.origin.coordinates[0], latitude: route.origin.coordinates[1], zoom: 8 } : preset === "Regional Checkpoint" ? { ...fitCamera(route, view), longitude: route.checkpoint.coordinates[0], latitude: route.checkpoint.coordinates[1], zoom: 8 } : preset === "Crisis Destination" ? { ...fitCamera(route, view), longitude: route.destination.coordinates[0], latitude: route.destination.coordinates[1], zoom: 8 } : fitCamera(route, view);
+  const adjustCalibration = (key: Model3dKey, field: "pitch" | "yaw" | "scale", value: number) => {
+    setCalibration(previous => ({ ...previous, [key]: { ...previous[key], [field]: field === "scale" ? Math.max(0.5, Math.min(2, value)) : value } }));
+  };
 
-      {/* Interactive SVG Multi-Echelon Diagram */}
-      <div className="relative flex-1 min-h-[380px] p-4 flex items-center justify-center">
-        <svg
-          viewBox="0 0 900 420"
-          className="w-full h-full max-h-[480px]"
-          fill="none"
-          xmlns="http://www.w3.org/2000/svg"
-        >
-          {/* Background Grid Pattern */}
-          <defs>
-            <pattern
-              id="grid-pattern"
-              width="40"
-              height="40"
-              patternUnits="userSpaceOnUse"
-            >
-              <path
-                d="M 40 0 L 0 0 0 40"
-                fill="none"
-                stroke="rgba(51, 65, 85, 0.2)"
-                strokeWidth="1"
-              />
-            </pattern>
-
-            {/* Linear & Radial Gradients */}
-            <linearGradient id="airGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#38bdf8" />
-              <stop offset="100%" stopColor="#a855f7" />
-            </linearGradient>
-
-            <linearGradient id="oceanGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#0284c7" />
-              <stop offset="100%" stopColor="#0d9488" />
-            </linearGradient>
-
-            <linearGradient id="pivotGrad" x1="0%" y1="0%" x2="100%" y2="0%">
-              <stop offset="0%" stopColor="#f59e0b" />
-              <stop offset="100%" stopColor="#10b981" />
-            </linearGradient>
-
-            <filter id="glowAir" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="4" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
-            </filter>
-
-            <filter id="glowPivot" x="-20%" y="-20%" width="140%" height="140%">
-              <feGaussianBlur stdDeviation="6" result="blur" />
-              <feComposite in="SourceGraphic" in2="blur" operator="over" />
-            </filter>
-          </defs>
-
-          <rect width="900" height="420" fill="url(#grid-pattern)" />
-
-          {/* ---------------- PATH 0: DIRECT AIR LEG (Dubai -> Disaster Site) ---------------- */}
-          {/* Arched high-altitude flight trajectory */}
-          <path
-            d="M 120 220 Q 450 60 780 220"
-            stroke={directAirActive ? "url(#airGrad)" : "rgba(71, 85, 105, 0.4)"}
-            strokeWidth={directAirActive ? "4" : "2"}
-            strokeDasharray={directAirActive ? "8 4" : "4 4"}
-            fill="none"
-            filter={directAirActive ? "url(#glowAir)" : undefined}
-            className={directAirActive ? "animate-pulse" : ""}
-          />
-          <text
-            x="450"
-            y="95"
-            textAnchor="middle"
-            fill={directAirActive ? "#38bdf8" : "#64748b"}
-            className="text-[11px] font-mono font-semibold"
-          >
-            Direct Air Corridor ($2,000/t • 2.0d)
-          </text>
-
-          {/* ---------------- PATH 1: LEG 1 OCEAN (Dubai -> Regional Checkpoint) ---------------- */}
-          <path
-            d="M 120 220 C 220 300, 320 300, 450 240"
-            stroke={
-              oceanLeg1Active
-                ? disruptionTriggeredNow && activeAction === 1
-                  ? "#ef4444"
-                  : "#0284c7"
-                : "rgba(71, 85, 105, 0.3)"
-            }
-            strokeWidth={oceanLeg1Active ? "4" : "2"}
-            fill="none"
-            strokeDasharray={oceanLeg1Active ? "none" : "3 3"}
-          />
-          <text
-            x="270"
-            y="300"
-            textAnchor="middle"
-            fill={oceanLeg1Active ? "#38bdf8" : "#64748b"}
-            className="text-[11px] font-mono"
-          >
-            Ocean Leg 1 ($200/t • 7.0d base)
-          </text>
-
-          {/* ---------------- PATH 2: LEG 1 LAND (Dubai -> Regional Checkpoint) ---------------- */}
-          <path
-            d="M 120 220 L 450 240"
-            stroke={landLeg1Active ? "#10b981" : "rgba(71, 85, 105, 0.25)"}
-            strokeWidth={landLeg1Active ? "4" : "1.5"}
-            strokeDasharray="6 4"
-            fill="none"
-          />
-          <text
-            x="280"
-            y="215"
-            textAnchor="middle"
-            fill={landLeg1Active ? "#34d399" : "#64748b"}
-            className="text-[10px] font-mono"
-          >
-            Overland Leg 1 ($500/t • 4.0d)
-          </text>
-
-          {/* ---------------- PATH 3: LEG 2 NOMINAL (Regional Checkpoint -> Disaster Site) ---------------- */}
-          <path
-            d="M 450 240 C 560 300, 680 300, 780 220"
-            stroke={
-              continueNominalActive
-                ? disruptionTriggeredNow && activeAction === 4
-                  ? "#ef4444"
-                  : "#0ea5e9"
-                : "rgba(71, 85, 105, 0.3)"
-            }
-            strokeWidth={continueNominalActive ? "4" : "2"}
-            fill="none"
-            strokeDasharray={continueNominalActive ? "none" : "3 3"}
-          />
-          <text
-            x="620"
-            y="300"
-            textAnchor="middle"
-            fill={continueNominalActive ? "#38bdf8" : "#64748b"}
-            className="text-[11px] font-mono"
-          >
-            Nominal Leg 2 ($100/t • 5.0d)
-          </text>
-
-          {/* ---------------- PATH 4: EMERGENCY PIVOT TO AIR (Regional Checkpoint -> Disaster Site) ---------------- */}
-          <path
-            d="M 450 240 Q 610 130 780 220"
-            stroke={pivotAirActive ? "url(#pivotGrad)" : "rgba(245, 158, 11, 0.25)"}
-            strokeWidth={pivotAirActive ? "5" : "2"}
-            strokeDasharray={pivotAirActive ? "8 4" : "4 4"}
-            fill="none"
-            filter={pivotAirActive ? "url(#glowPivot)" : undefined}
-            className={pivotAirActive ? "animate-pulse" : ""}
-          />
-          <text
-            x="620"
-            y="155"
-            textAnchor="middle"
-            fill={pivotAirActive ? "#fbbf24" : "#78716c"}
-            className="text-[11px] font-mono font-bold"
-          >
-            ⚡ Emergency Pivot: Air Cargo ($2,000/t + $500 switch)
-          </text>
-
-          {/* ---------------- MARITIME BOTTLENECK HAZARD BADGE ---------------- */}
-          {anyDisruption && (
-            <g transform="translate(260, 275)">
-              <rect
-                x="-15"
-                y="-15"
-                width="30"
-                height="30"
-                rx="6"
-                fill="#7f1d1d"
-                stroke="#ef4444"
-                strokeWidth="2"
-                className="animate-hazard"
-              />
-              <text
-                x="0"
-                y="5"
-                textAnchor="middle"
-                fill="#fca5a5"
-                fontSize="14"
-                fontWeight="bold"
-              >
-                ⚠️
-              </text>
-            </g>
-          )}
-
-          {/* ---------------- NODE 1: DUBAI ORIGIN ---------------- */}
-          <g transform="translate(120, 220)">
-            <circle
-              r="40"
-              fill="#0f172a"
-              stroke="#10b981"
-              strokeWidth="3"
-              className="drop-shadow-lg"
-            />
-            <circle
-              r="46"
-              fill="none"
-              stroke="#10b981"
-              strokeWidth="1.5"
-              strokeDasharray="4 4"
-              className="animate-spin"
-              style={{ transformOrigin: "0 0", animationDuration: "12s" }}
-            />
-            <foreignObject x="-24" y="-24" width="48" height="48">
-              <div className="flex items-center justify-center w-full h-full text-emerald-400">
-                <Plane className="h-6 w-6" />
-              </div>
-            </foreignObject>
-            <text
-              y="60"
-              textAnchor="middle"
-              fill="#f8fafc"
-              className="text-xs font-bold font-sans"
-            >
-              DUBAI ORIGIN
-            </text>
-            <text
-              y="74"
-              textAnchor="middle"
-              fill="#94a3b8"
-              className="text-[10px] font-mono"
-            >
-              International Humanitarian City
-            </text>
-          </g>
-
-          {/* ---------------- NODE 2: REGIONAL CHECKPOINT ---------------- */}
-          <g transform="translate(450, 240)">
-            <circle
-              r="42"
-              fill="#0f172a"
-              stroke={pivotAirActive ? "#f59e0b" : "#3b82f6"}
-              strokeWidth="3"
-              className="drop-shadow-lg"
-            />
-            <circle
-              r="48"
-              fill="none"
-              stroke={pivotAirActive ? "#f59e0b" : "#3b82f6"}
-              strokeWidth="1.5"
-              strokeDasharray="4 4"
-              className="animate-spin"
-              style={{ transformOrigin: "0 0", animationDuration: "16s" }}
-            />
-            <foreignObject x="-24" y="-24" width="48" height="48">
-              <div className="flex items-center justify-center w-full h-full text-cyan-400">
-                {pivotAirActive ? (
-                  <Zap className="h-6 w-6 text-amber-400 animate-pulse" />
-                ) : (
-                  <Ship className="h-6 w-6 text-blue-400" />
-                )}
-              </div>
-            </foreignObject>
-            <text
-              y="62"
-              textAnchor="middle"
-              fill="#f8fafc"
-              className="text-xs font-bold font-sans"
-            >
-              REGIONAL CHECKPOINT
-            </text>
-            <text
-              y="76"
-              textAnchor="middle"
-              fill="#94a3b8"
-              className="text-[10px] font-mono"
-            >
-              Intermodal Staging Hub
-            </text>
-          </g>
-
-          {/* ---------------- NODE 3: DISASTER SITE ---------------- */}
-          <g transform="translate(780, 220)">
-            <circle
-              r="40"
-              fill="#0f172a"
-              stroke={isFinalStep && !isDelivered ? "#ef4444" : "#10b981"}
-              strokeWidth="3"
-              className="drop-shadow-lg"
-            />
-            <circle
-              r="46"
-              fill="none"
-              stroke={isFinalStep && !isDelivered ? "#ef4444" : "#10b981"}
-              strokeWidth="1.5"
-              strokeDasharray="4 4"
-              className="animate-spin"
-              style={{ transformOrigin: "0 0", animationDuration: "10s" }}
-            />
-            <foreignObject x="-24" y="-24" width="48" height="48">
-              <div className="flex items-center justify-center w-full h-full text-emerald-400">
-                <MapPin
-                  className={`h-6 w-6 ${
-                    isFinalStep && !isDelivered ? "text-red-400" : "text-emerald-400"
-                  }`}
-                />
-              </div>
-            </foreignObject>
-            <text
-              y="60"
-              textAnchor="middle"
-              fill="#f8fafc"
-              className="text-xs font-bold font-sans"
-            >
-              DISASTER SITE
-            </text>
-            <text
-              y="74"
-              textAnchor="middle"
-              fill="#94a3b8"
-              className="text-[10px] font-mono"
-            >
-              Forward Crisis Operations
-            </text>
-          </g>
-
-          {/* Animated Cargo Packet indicator based on current step */}
-          {activeAction === 0 && (
-            <g className="animate-pulse">
-              <circle cx="450" cy="140" r="12" fill="#38bdf8" />
-              <text x="450" y="144" textAnchor="middle" fill="#0f172a" fontSize="11" fontWeight="bold">
-                ✈️
-              </text>
-            </g>
-          )}
-
-          {activeAction === 1 && (
-            <g className="animate-pulse">
-              <circle cx="280" cy="275" r="12" fill="#0284c7" />
-              <text x="280" y="279" textAnchor="middle" fill="#ffffff" fontSize="11" fontWeight="bold">
-                🚢
-              </text>
-            </g>
-          )}
-
-          {activeAction === 2 && (
-            <g className="animate-pulse">
-              <circle cx="280" cy="230" r="12" fill="#10b981" />
-              <text x="280" y="234" textAnchor="middle" fill="#ffffff" fontSize="11" fontWeight="bold">
-                🚚
-              </text>
-            </g>
-          )}
-
-          {activeAction === 3 && (
-            <g className="animate-pulse">
-              <circle cx="620" cy="185" r="14" fill="#f59e0b" filter="url(#glowPivot)" />
-              <text x="620" y="189" textAnchor="middle" fill="#0f172a" fontSize="12" fontWeight="bold">
-                ⚡✈️
-              </text>
-            </g>
-          )}
-
-          {activeAction === 4 && (
-            <g className="animate-pulse">
-              <circle cx="620" cy="285" r="12" fill="#0ea5e9" />
-              <text x="620" y="289" textAnchor="middle" fill="#ffffff" fontSize="11" fontWeight="bold">
-                🚢
-              </text>
-            </g>
-          )}
-        </svg>
-      </div>
-
-      {/* Bottom Step Notes Footer */}
-      <div className="p-3 bg-slate-900/60 border-t border-slate-800 text-xs text-slate-300 flex items-center justify-between">
-        <div className="flex items-center space-x-2">
-          <span className="font-semibold text-white">Current Echelon:</span>
-          <span className="px-2 py-0.5 rounded bg-slate-800 font-mono text-emerald-400">
-            {currentStep.location_start_name} ➔ {currentStep.location_end_name}
-          </span>
-          <span className="text-slate-400 hidden md:inline">
-            | Action: <span className="text-cyan-300">{currentStep.action_name}</span> ({currentStep.transport_mode})
-          </span>
-        </div>
-        <div className="text-[11px] font-mono text-slate-400">
-          Slack:{" "}
-          <span
-            className={
-              currentStep.deadline_remaining >= 0 ? "text-emerald-400 font-bold" : "text-red-400 font-bold"
-            }
-          >
-            {currentStep.deadline_remaining.toFixed(1)} days
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-};
+  return <section className="map-card">
+    <header className="map-toolbar"><div><p className="eyebrow">Global relief corridor · live digital twin</p><h2><Radio size={16} /> International 3D Geospatial Twin</h2></div><div className="map-actions"><label className="preset-select"><MapPinned size={14} /><select value={preset} onChange={event => setPreset(event.target.value)}>{["Corridor Overview", "Dubai Origin Hub", "Regional Checkpoint", "Crisis Destination"].map(item => <option key={item}>{item}</option>)}</select></label><div className="segmented"><button className={view === "3d" ? "active" : ""} onClick={() => setView("3d")}><Box size={13} /> 3D Twin</button><button className={view === "2d" ? "active" : ""} onClick={() => setView("2d")}><MapIcon size={13} /> 2D Graph</button></div><button className="icon-button" title="Reset view" onClick={() => setPreset("Corridor Overview")}><RotateCcw size={14} /></button><button className="calibration-button" onClick={() => setCalibrationOpen(!calibrationOpen)}>3D calibration</button></div>{calibrationOpen && <div className="calibration-popover"><strong>Model calibration</strong>{(["cargoShip", "cargoPlane", "cargoTruck", "isoContainer"] as const).map(key => <div key={key}><span>{key.replace("cargo", "")}</span><button onClick={() => adjustCalibration(key, "pitch", 0)}>Pitch 0°</button><button onClick={() => adjustCalibration(key, "pitch", 90)}>Pitch 90°</button><button onClick={() => adjustCalibration(key, "pitch", -90)}>Pitch -90°</button><button onClick={() => adjustCalibration(key, "yaw", -90)}>Yaw -90°</button><button onClick={() => adjustCalibration(key, "yaw", 90)}>Yaw +90°</button><button onClick={() => adjustCalibration(key, "yaw", 180)}>Yaw 180°</button><button onClick={() => adjustCalibration(key, "scale", calibration[key].scale - 0.1)}>Scale −</button><button onClick={() => adjustCalibration(key, "scale", calibration[key].scale + 0.1)}>Scale +</button><small>{calibration[key].scale.toFixed(1)}x</small></div>)}</div>}</header>
+    <div className="map-viewport"><Map key={`${route.origin.id}-${route.checkpoint.id}-${route.destination.id}-${preset}-${view}`} initialViewState={camera} mapStyle="https://tiles.openfreemap.org/styles/liberty" attributionControl={false}><NavigationControl position="bottom-right" showCompass /><DeckOverlay layers={layers} /></Map><div className="international-map-label"><strong>{route.origin.label.split(",")[0]}</strong><span>→ {route.checkpoint.label.split(",")[0]} → {route.destination.label.split(",")[0]}</span><small>{route.mode === "multimodal" ? `${route.leg1Mode} / ${route.leg2Mode}` : route.mode} · progress {(progress * 100).toFixed(0)}%</small></div>{step?.disruption_triggered && <div className="map-alert"><AlertTriangle size={14} /> Stochastic disruption active on current leg</div>}</div>
+    <footer className="map-legend"><span><i className="legend-line air" /> Strategic airlift</span><span><i className="legend-line road" /> Cross-border convoy</span><span><i className="legend-line sea" /> Maritime sea lane</span><span><i className="legend-square healthy" /> Global staging stock</span><span className="map-source">OpenFreeMap Liberty · International corridor projection</span></footer>
+  </section>;
+}
