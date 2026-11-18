@@ -632,7 +632,7 @@ def load_training_metrics(downsample_factor: int = 25) -> TrainingMetricsRespons
     df["rolling_reward"] = df["reward"].rolling(100, min_periods=1).mean()
     df["rolling_cost"] = df["freight_cost"].rolling(100, min_periods=1).mean()
 
-    # Downsample for frontend performance
+    # Downsample for interactive dashboard performance
     sub_df = df.iloc[::downsample_factor]
 
     records = [

@@ -35,24 +35,12 @@ This project implements a **Constrained Markov Decision Process (CMDP)** and tra
 ## 📂 Project Structure
 ```text
 humanitarian-rl-routing/
-├── backend/                        # Modular FastAPI backend
-│   ├── main.py                    # REST API server & static asset mount
-│   ├── schemas.py                 # Pydantic models for simulation & showdown
+├── backend/
+│   ├── schemas.py                 # Pydantic simulation and benchmark models
 │   └── inference.py               # Checkpoint caching, CVaR inference & simulation runner
-├── frontend/                       # Interactive React + TypeScript + Tailwind CSS web app
-│   ├── src/
-│   │   ├── components/
-│   │   │   ├── ControlSidebar.tsx         # What-If scenario controls & timeline playback
-│   │   │   ├── RouteVisualizer.tsx        # Multi-echelon flow diagram & intermodal pivot animation
-│   │   │   ├── QuantileRiskInspector.tsx  # Plotly 50-quantile distribution & 5% CVaR tail inspector
-│   │   │   ├── AgentShowdown.tsx          # 7-model synchronous benchmark comparison
-│   │   │   ├── TrainingDiagnostics.tsx    # Training telemetry curves
-│   │   │   ├── Navbar.tsx                 # Operational command center header
-│   │   │   └── PlotlyChart.tsx            # Responsive Plotly container
-│   │   ├── api.ts                         # Typed API client
-│   │   ├── types.ts                       # TypeScript interfaces
-│   │   └── App.tsx                        # Main command center layout
-│   └── package.json
+├── streamlit_app.py               # Interactive Streamlit command center
+├── viewer_3d.py                   # Embedded Three.js route visualizer
+├── assets/models/                 # Self-contained GLB transport assets
 ├── run_app.sh                      # Unified Unix/Mac bash launcher script
 ├── run_app.bat                     # Windows one-click command center launcher
 ├── config.py                       # Centralized environment and agent hyperparameters
@@ -93,9 +81,9 @@ pip install -r requirements.txt
 
 ---
 
-## 🌐 Web Application (Command Center)
+## 🌐 Command Center
 
-An interactive, dark-mode operational command center built with **FastAPI** (backend) and **React + TypeScript + Tailwind CSS + Plotly.js** (frontend) to explore the 3-echelon environment, inspect distributional tail risk, and run synchronous 7-model showdowns.
+An interactive dark-mode **Streamlit** command center that runs the environment and model registry directly in Python. It includes 3D route playback, distributional tail-risk inspection, and synchronous 7-model showdowns.
 
 ### Quick Start (One Command)
 - **Linux / macOS**:
@@ -111,20 +99,11 @@ An interactive, dark-mode operational command center built with **FastAPI** (bac
 
 ### Manual Execution
 
-#### 1. Start FastAPI Backend (Port 8000)
 ```bash
-python -m uvicorn backend.main:app --host 127.0.0.1 --port 8000 --reload
+streamlit run streamlit_app.py
 ```
-- Interactive API Docs (Swagger UI): `http://127.0.0.1:8000/docs`
-- Unified Web Application: `http://127.0.0.1:8000/`
 
-#### 2. Start React Dev Server (Port 5173, optional for development)
-```bash
-cd frontend
-npm install
-npm run dev
-```
-Open `http://localhost:5173` in your browser.
+Open `http://localhost:8501` in your browser.
 
 ---
 
