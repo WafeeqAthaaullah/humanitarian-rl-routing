@@ -65,7 +65,7 @@ STATE_DIM = 11
 ACTION_DIM = 5
 NUM_QUANTILES = 50
 HIDDEN_DIM = 128
-CVAR_ALPHA = 0.05   # worst-case fraction for CVaR action selection
+CVAR_ALPHA = 0.10   # worst-case fraction for CVaR action selection
 
 # ---------------------------------------------------------------------------
 # Training hyperparameters
