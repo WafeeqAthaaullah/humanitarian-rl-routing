@@ -19,7 +19,7 @@ from agents.random_agent import RandomMaskedAgent
 from envs.dubai_humanitarian_env import DubaiHumanitarianEnv
 
 
-def evaluate_agent(agent, env, agent_type="heuristic", episodes=500, seed=0):
+def evaluate_agent(agent, env, agent_type="heuristic", episodes=500, seed=0, regime="nominal"):
     """
     Evaluate an agent across a given number of seeded Monte Carlo episodes.
 
@@ -35,6 +35,8 @@ def evaluate_agent(agent, env, agent_type="heuristic", episodes=500, seed=0):
         Number of test episodes.
     seed : int
         Starting random seed for reproducibility.
+    regime : str
+        Evaluation regime: 'nominal' (standard environment) or 'stress' (high disruption shock & tight deadline).
 
     Returns
     -------
@@ -50,6 +52,15 @@ def evaluate_agent(agent, env, agent_type="heuristic", episodes=500, seed=0):
 
     for episode in range(episodes):
         state, info = env.reset(seed=seed + episode)
+        
+        # High-Disruption Stress Regime: Tests tail-risk resilience under adverse bottleneck conditions
+        if regime == "stress":
+            rng = np.random.RandomState(seed + episode)
+            state[3] = float(rng.uniform(6.0, 14.0))   # Tight deadline: 6 to 14 days
+            state[10] = float(rng.uniform(0.35, 0.50)) # Severe disruption risk: 35% to 50% shock prob
+            env.state = state
+            info["action_mask"] = env.get_action_mask()
+
         is_tier1 = bool(state[0] == 1.0)
         tier1_count += int(is_tier1)
         while True:
@@ -135,11 +146,11 @@ def confidence_interval(values):
     return float(np.mean(values)), margin
 
 
-def plot_metrics(labels, metrics, output_dir="results/plots"):
+def plot_metrics(labels, metrics, output_dir="results/plots", title_suffix="", filename_suffix=""):
     """
     Generate and save two separate, publication-quality bar charts:
-    1. violation_rate_comparison.png: Tier 1 Deadline Violation Rate (%)
-    2. freight_cost_comparison.png: Average Freight Cost ($)
+    1. violation_rate_comparison{filename_suffix}.png: Tier 1 Deadline Violation Rate (%)
+    2. freight_cost_comparison{filename_suffix}.png: Average Freight Cost ($)
     """
     os.makedirs(output_dir, exist_ok=True)
     x = np.arange(len(labels))
@@ -202,7 +213,7 @@ def plot_metrics(labels, metrics, output_dir="results/plots"):
         )
 
     ax.set_ylabel("Tier 1 Deadline Violation Rate (%)", fontsize=11, fontweight="bold")
-    ax.set_title("Tier 1 Deadline Violation Rate Across All Benchmark Models", fontsize=13, fontweight="bold", pad=12)
+    ax.set_title(f"Tier 1 Deadline Violation Rate Across All Benchmark Models{title_suffix}", fontsize=13, fontweight="bold", pad=12)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=10, fontweight="semibold")
     ax.set_ylim(0, max(max_v * 1.15, target_threshold + 5.0))
@@ -210,7 +221,7 @@ def plot_metrics(labels, metrics, output_dir="results/plots"):
     ax.legend(loc="upper right", framealpha=0.9, fontsize=10)
     plt.tight_layout()
 
-    violation_plot_path = os.path.join(output_dir, "violation_rate_comparison.png")
+    violation_plot_path = os.path.join(output_dir, f"violation_rate_comparison{filename_suffix}.png")
     plt.savefig(violation_plot_path, dpi=300)
     plt.close()
     print(f"Saved: {violation_plot_path}")
@@ -249,20 +260,21 @@ def plot_metrics(labels, metrics, output_dir="results/plots"):
         )
 
     ax.set_ylabel("Average Freight Cost ($)", fontsize=11, fontweight="bold")
-    ax.set_title("Average Freight Cost Across All Benchmark Models", fontsize=13, fontweight="bold", pad=12)
+    ax.set_title(f"Average Freight Cost Across All Benchmark Models{title_suffix}", fontsize=13, fontweight="bold", pad=12)
     ax.set_xticks(x)
     ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=10, fontweight="semibold")
     ax.set_ylim(0, max_c * 1.15)
     ax.grid(axis="y", linestyle=":", alpha=0.6)
     plt.tight_layout()
 
-    cost_plot_path = os.path.join(output_dir, "freight_cost_comparison.png")
+    cost_plot_path = os.path.join(output_dir, f"freight_cost_comparison{filename_suffix}.png")
     plt.savefig(cost_plot_path, dpi=300)
     plt.close()
     print(f"Saved: {cost_plot_path}")
 
 
-def run_benchmark(
+def _run_single_regime_benchmark(
+    regime="nominal",
     episodes=500,
     seeds=None,
     dqn_ckpt="results/checkpoints/dqn_model.pth",
@@ -273,11 +285,10 @@ def run_benchmark(
     if seeds is None:
         seeds = [0]
 
-    # Prefer best_feasible_qr_dqn_model.pth if qr_cvar_ckpt does not exist or if best exists
-    if not os.path.exists(qr_cvar_ckpt):
-        fallback = "results/checkpoints/best_feasible_qr_dqn_model.pth"
-        if os.path.exists(fallback):
-            qr_cvar_ckpt = fallback
+    # Prefer best_feasible_qr_dqn_model.pth if available
+    best_feasible_path = "results/checkpoints/best_feasible_qr_dqn_model.pth"
+    if (qr_cvar_ckpt == "results/checkpoints/qr_dqn_model.pth" or not os.path.exists(qr_cvar_ckpt)) and os.path.exists(best_feasible_path):
+        qr_cvar_ckpt = best_feasible_path
 
     # Define all 7 models according to benchmark specifications
     policies = {
@@ -293,9 +304,16 @@ def run_benchmark(
     aggregate = {}
     metrics_summary = {}
 
-    print("\n" + "=" * 80)
+    regime_title = (
+        "Stress Disruption Regime (Adverse Shock >= 35%, Critical Deadlines 6-14d)"
+        if regime == "stress"
+        else "Nominal / Standard Uniform Regime"
+    )
+
+    print("\n" + "=" * 95)
     print(f"Running Monte Carlo Benchmark: {len(policies)} Models x {len(seeds)} Seed(s) x {episodes} Episodes")
-    print("=" * 80 + "\n")
+    print(f"Evaluation Mode: {regime_title}")
+    print("=" * 95 + "\n")
 
     for name, (factory, agent_type) in policies.items():
         runs = []
@@ -305,7 +323,9 @@ def run_benchmark(
             torch.manual_seed(seed)
             env = DubaiHumanitarianEnv()
             agent = factory(env)
-            eval_res = evaluate_agent(agent, env, agent_type=agent_type, episodes=episodes, seed=seed)
+            eval_res = evaluate_agent(
+                agent, env, agent_type=agent_type, episodes=episodes, seed=seed, regime=regime
+            )
             runs.append(eval_res)
 
         aggregate[name] = runs
@@ -318,24 +338,87 @@ def run_benchmark(
             "cost_ci": cost_ci,
         }
 
-    # Print clean side-by-side comparison table
-    print("\n" + "=" * 82)
-    print(f"{'Model Name':<20} | {'Tier 1 Violation Rate (%)':<26} | {'Average Freight Cost ($)':<26}")
-    print("-" * 82)
+    # Rank feasible models (< 5.0% violation) by average freight cost
+    feasible_models = [k for k, v in metrics_summary.items() if v["violation_mean"] <= 5.0]
+    feasible_models.sort(key=lambda k: metrics_summary[k]["cost_mean"])
+    rank_map = {name: f"#{i+1}" for i, name in enumerate(feasible_models)}
+
+    # Print comprehensive CMDP comparison table
+    print("\n" + "=" * 105)
+    print(f"{'Model Name':<19} | {'Tier 1 Viol (%)':<20} | {'Freight Cost ($)':<22} | {'CMDP Constraint':<18} | {'Cost Rank':<10}")
+    print("-" * 105)
     for name, m in metrics_summary.items():
         if len(seeds) > 1:
-            v_str = f"{m['violation_mean']:6.2f}% +/- {m['violation_ci']:.2f}"
+            v_str = f"{m['violation_mean']:5.2f}% +/- {m['violation_ci']:.2f}"
             c_str = f"${m['cost_mean']:,.2f} +/- ${m['cost_ci']:,.2f}"
         else:
-            v_str = f"{m['violation_mean']:6.2f}%"
+            v_str = f"{m['violation_mean']:5.2f}%"
             c_str = f"${m['cost_mean']:,.2f}"
-        print(f"{name:<20} | {v_str:<26} | {c_str:<26}")
-    print("=" * 82 + "\n")
+        
+        is_feasible = (m["violation_mean"] <= 5.0)
+        status_str = "FEASIBLE (<=5%)" if is_feasible else "VIOLATED (>5%)"
+        rank_str = rank_map.get(name, "-")
+        if rank_str == "#1":
+            rank_str = "#1 (BEST)"
+        print(f"{name:<19} | {v_str:<20} | {c_str:<22} | {status_str:<18} | {rank_str:<10}")
+    print("=" * 105 + "\n")
 
-    # Generate separate plots
-    plot_metrics(list(policies.keys()), metrics_summary, output_dir="results/plots")
+    # Generate separate plots for this regime
+    plot_suffix = " (Stress Regime)" if regime == "stress" else ""
+    file_suffix = "_stress" if regime == "stress" else ""
+    plot_metrics(
+        list(policies.keys()),
+        metrics_summary,
+        output_dir="results/plots",
+        title_suffix=plot_suffix,
+        filename_suffix=file_suffix,
+    )
 
     return aggregate
+
+
+def run_benchmark(
+    episodes=500,
+    seeds=None,
+    regime="all",
+    dqn_ckpt="results/checkpoints/dqn_model.pth",
+    ddqn_ckpt="results/checkpoints/ddqn_lagrangian_model.pth",
+    qr_mean_ckpt="results/checkpoints/qr_dqn_mean_model.pth",
+    qr_cvar_ckpt="results/checkpoints/qr_dqn_model.pth",
+):
+    if regime == "all":
+        print("\n" + "#" * 95)
+        print("  EXECUTING DUAL-REGIME EVALUATION: 1. STANDARD BENCHMARK & 2. STRESS TEST BENCHMARK")
+        print("#" * 95)
+        agg_nom = _run_single_regime_benchmark(
+            regime="nominal",
+            episodes=episodes,
+            seeds=seeds,
+            dqn_ckpt=dqn_ckpt,
+            ddqn_ckpt=ddqn_ckpt,
+            qr_mean_ckpt=qr_mean_ckpt,
+            qr_cvar_ckpt=qr_cvar_ckpt,
+        )
+        agg_stress = _run_single_regime_benchmark(
+            regime="stress",
+            episodes=episodes,
+            seeds=seeds,
+            dqn_ckpt=dqn_ckpt,
+            ddqn_ckpt=ddqn_ckpt,
+            qr_mean_ckpt=qr_mean_ckpt,
+            qr_cvar_ckpt=qr_cvar_ckpt,
+        )
+        return {"nominal": agg_nom, "stress": agg_stress}
+    else:
+        return _run_single_regime_benchmark(
+            regime=regime,
+            episodes=episodes,
+            seeds=seeds,
+            dqn_ckpt=dqn_ckpt,
+            ddqn_ckpt=ddqn_ckpt,
+            qr_mean_ckpt=qr_mean_ckpt,
+            qr_cvar_ckpt=qr_cvar_ckpt,
+        )
 
 
 if __name__ == "__main__":
@@ -344,6 +427,12 @@ if __name__ == "__main__":
     parser.add_argument("--seeds", type=int, default=1, help="Number of evaluation seeds (default: 1)")
     parser.add_argument("--dqn-ckpt", default="results/checkpoints/dqn_model.pth")
     parser.add_argument("--ddqn-ckpt", default="results/checkpoints/ddqn_lagrangian_model.pth")
+    parser.add_argument(
+        "--regime",
+        choices=["nominal", "stress", "all"],
+        default="all",
+        help="Evaluation regime: 'nominal' (standard uniform), 'stress' (high shock >= 35%% & tight deadlines), or 'all' (default: all)",
+    )
     parser.add_argument("--qr-mean-ckpt", default="results/checkpoints/qr_dqn_mean_model.pth")
     parser.add_argument("--qr-cvar-ckpt", default="results/checkpoints/qr_dqn_model.pth")
 
@@ -352,6 +441,7 @@ if __name__ == "__main__":
     run_benchmark(
         episodes=args.episodes,
         seeds=seed_values,
+        regime=args.regime,
         dqn_ckpt=args.dqn_ckpt,
         ddqn_ckpt=args.ddqn_ckpt,
         qr_mean_ckpt=args.qr_mean_ckpt,

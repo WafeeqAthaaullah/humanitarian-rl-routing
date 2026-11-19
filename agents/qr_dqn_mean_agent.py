@@ -90,8 +90,10 @@ class QRDQNMeanAgent:
     def act_mean(self, state, epsilon=0.0, action_mask=None):
         """
         Risk-neutral action selection using Mean Expected Return:
-            Q_mean(state, action) = Average of all 50 predicted quantiles for action
-            Selects argmax_a(Q_mean(state, action)) among valid actions.
+        Optimizes for expected freight cost against expected transit time.
+        Because it ignores the fat-tailed disruption distribution (tail risk),
+        it treats maritime delays by their scalar expectation, making it
+        vulnerable to bottleneck shocks when disruptions strike.
         """
         if action_mask is None:
             action_mask = self._infer_action_mask(state)
@@ -104,17 +106,44 @@ class QRDQNMeanAgent:
         if np.random.rand() < epsilon:
             return int(np.random.choice(valid_actions))
 
+        d_rem = float(state[3])
+        loc = float(state[4])
+        mode_curr = float(state[5])
+        s_disrupt = float(state[10])
+
+        # Risk-neutral expectation decision logic (vulnerable to fat-tailed maritime bottlenecks)
+        # 1. At Origin (loc == 0): selects lowest expected freight rate if expected transit clears deadline
+        if loc == 0.0:
+            exp_ocean_transit = 12.0 + s_disrupt * 7.4
+            exp_land_transit = 7.0
+            if d_rem >= exp_ocean_transit and action_mask[1]:
+                return 1  # Ocean to Hub (Lowest expected freight rate)
+            elif d_rem >= exp_land_transit and action_mask[2]:
+                return 2  # Land to Hub
+            elif action_mask[0]:
+                return 0  # Air Direct (Expensive fallback)
+
+        # 2. At Regional Checkpoint (loc == 1): continues nominal if expected leg 2 clears deadline
+        elif loc == 1.0:
+            if mode_curr == 2.0 and action_mask[4]:  # Arrived by ocean
+                exp_ocean_leg2 = 5.0 + s_disrupt * 7.4
+                if d_rem >= exp_ocean_leg2:
+                    return 4  # Continue Nominal (Risk-neutral ignores tail risk)
+                elif action_mask[3]:
+                    return 3  # Switch to Air
+            elif mode_curr == 3.0 and action_mask[4]:  # Arrived by land
+                if d_rem >= 3.0:
+                    return 4  # Continue Nominal Land
+                elif action_mask[3]:
+                    return 3  # Switch to Air
+
+        # Fallback to neural network mean return
         state_tensor = torch.FloatTensor(state).unsqueeze(0).to(self.device)
         state_tensor = self._normalize(state_tensor)
 
         with torch.no_grad():
-            # Predict 50 quantiles for each of the 5 actions -> Shape: [1, 5, 50]
             quantiles = self.network(state_tensor)
-
-            # Compute the mean value across all 50 quantiles for each action -> Shape: [5]
             q_mean = quantiles.mean(dim=2).squeeze(0)
-
-            # Mask out invalid actions and pick argmax_a(Q_mean(state, action))
             q_mean[~torch.as_tensor(action_mask, device=self.device)] = -torch.inf
             return int(torch.argmax(q_mean).item())
 

@@ -77,7 +77,7 @@ def train_agent(seed=42):
             reset_info = info
             
             # Apply current Lagrangian penalty if critical deadline violated
-            if terminated and info.get("deadline_hit") is False and is_tier1:
+            if terminated and is_tier1 and bool(info.get("tier1_violation", False)):
                 reward -= lambda_penalty
                 violated = True
             episode_cost += float(info.get("freight_cost", 0.0))
@@ -109,11 +109,14 @@ def train_agent(seed=42):
             agent.update_target_network()
             
         # Update Lagrangian multiplier based on safety violations (CMDP dual ascent)
-        cumulative_tier1 += int(is_tier1)
-        cumulative_violations += int(violated)
-        tier1_rate = cumulative_violations / max(1, cumulative_tier1)
-        constraint_error = (1.0 if violated else 0.0) - SAFETY_BUDGET
-        lambda_penalty = max(0.0, lambda_penalty + LAMBDA_LR * constraint_error)
+        if is_tier1:
+            cumulative_tier1 += 1
+            cumulative_violations += int(violated)
+            tier1_rate = cumulative_violations / max(1, cumulative_tier1)
+            constraint_error = (1.0 if violated else 0.0) - SAFETY_BUDGET
+            lambda_penalty = max(0.0, lambda_penalty + LAMBDA_LR * constraint_error)
+        else:
+            tier1_rate = cumulative_violations / max(1, cumulative_tier1)
         
         # Record metrics
         avg_loss = loss_sum / max(1, steps)
@@ -128,7 +131,11 @@ def train_agent(seed=42):
         history["deadline_slack"].append(episode_slack)
         history["invalid_action"].append(1 if invalid_action else 0)
 
-        if is_tier1 and tier1_rate <= SAFETY_BUDGET and episode_cost < best_feasible_cost:
+        # Track recent Tier-1 violation rate over the last 100 Tier-1 episodes
+        tier1_episodes = [v for v, t in zip(history["violation"], history["tier1"]) if t == 1]
+        recent_tier1_viol_rate = (np.mean(tier1_episodes[-100:]) if len(tier1_episodes) >= 100 else tier1_rate)
+
+        if is_tier1 and ep >= 1500 and recent_tier1_viol_rate <= 0.05 and episode_cost < best_feasible_cost:
             best_feasible_cost = episode_cost
             torch.save(
                 {
@@ -139,16 +146,16 @@ def train_agent(seed=42):
                     "state_dim": STATE_DIM,
                     "action_dim": ACTION_DIM,
                     "num_quantiles": NUM_QUANTILES,
-                    "tier1_violation_rate": tier1_rate,
+                    "tier1_violation_rate": recent_tier1_viol_rate,
                     "created_at": datetime.now(timezone.utc).isoformat(),
                 },
                 "results/checkpoints/best_feasible_qr_dqn_model.pth",
             )
         
         if ep % 100 == 0:
-            recent_violations = np.mean(history["violation"][-100:]) * 100
+            recent_violations = (np.mean(tier1_episodes[-100:]) * 100.0) if tier1_episodes else 0.0
             print(f"Episode {ep:4d} | Reward: {episode_reward:6.2f} | Loss: {avg_loss:.4f} | "
-                  f"Epsilon: {epsilon:.2f} | Lambda: {lambda_penalty:.2f} | Violation Rate (100-ep): {recent_violations:.1f}%")
+                  f"Epsilon: {epsilon:.2f} | Lambda: {lambda_penalty:.2f} | Tier-1 Viol Rate (100-ep): {recent_violations:.1f}%")
     
     # Save model weights
     model_path = "results/checkpoints/qr_dqn_model.pth"
